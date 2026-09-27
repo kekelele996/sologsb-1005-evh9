@@ -1,6 +1,6 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { BehaviorSubject, map, type Observable } from 'rxjs'
-import type { Annotation, Claim, ClaimVersion, Feature, Paragraph, Position, Role, ValidationIssue, WorkbenchState } from './models'
+import type { Annotation, Claim, ClaimVersion, Feature, MergePreview, Paragraph, Position, Role, SplitPartDraft, ValidationIssue, WorkbenchState } from './models'
 
 const STORAGE_KEY = 'patent-claim-mapping-workbench-v1'
 const POSITION_KEY = 'patent-claim-mapping-position-v1'
@@ -32,7 +32,7 @@ const initialAnnotations: Annotation[] = [
 function demoState(): WorkbenchState {
   return {
     claims: initialClaims, paragraphs: initialParagraphs, features: initialFeatures,
-    annotations: initialAnnotations, orphanMappings: [], versions: [],
+    annotations: initialAnnotations, orphanMappings: [], structureRecords: [], versions: [],
     role: 'author', currentUserRole: 'author', selectedClaimId: 'claim-1', selectedFeatureId: 'feature-b', activeTab: 'mapping'
   }
 }
@@ -70,7 +70,7 @@ export class WorkbenchService implements OnDestroy {
   get canRedo(): boolean { return this.future.length > 0 }
 
   selectClaim(id: string): void {
-    this.patchState(state => { state.selectedClaimId = id; state.selectedFeatureId = state.features.find(feature => feature.claimId === id)?.id || null })
+    this.patchState(state => { state.selectedClaimId = id; state.selectedFeatureId = state.features.find(feature => feature.claimId === id && !feature.archived)?.id || null })
     this.savePosition()
   }
 
@@ -166,8 +166,115 @@ export class WorkbenchService implements OnDestroy {
         if (item.parentId === id) item.parentId = null
       })
       state.annotations = state.annotations.filter(item => item.featureId !== id)
-      state.selectedFeatureId = state.features.find(item => item.claimId === state.selectedClaimId)?.id || null
+      state.selectedFeatureId = state.features.find(item => item.claimId === state.selectedClaimId && !item.archived)?.id || null
     })
+  }
+
+  previewMerge(ids: string[]): MergePreview | null {
+    const state = this.stateSubject.value
+    const sources = state.features.filter(feature => ids.includes(feature.id) && !feature.archived)
+    if (sources.length < 2 || new Set(sources.map(feature => feature.claimId)).size !== 1) return null
+    const sourceIds = new Set(sources.map(feature => feature.id))
+    const active = state.features.filter(feature => !feature.archived)
+    const isActive = (id: string | null): id is string => !!id && active.some(feature => feature.id === id)
+    const supportIds = Array.from(new Set(sources.flatMap(feature => feature.supportIds)))
+    const referenceIds = Array.from(new Set(sources.flatMap(feature => feature.referenceIds))).filter(id => !sourceIds.has(id) && isActive(id))
+    const parentId = sources.map(feature => feature.parentId).find(id => isActive(id) && !sourceIds.has(id)) || null
+    const annotations = state.annotations.filter(item => sourceIds.has(item.featureId))
+    const inbound: MergePreview['inbound'] = []
+    active.forEach(feature => {
+      if (sourceIds.has(feature.id)) return
+      if (feature.referenceIds.some(id => sourceIds.has(id))) inbound.push({ id: feature.id, kind: 'reference' })
+      if (feature.parentId && sourceIds.has(feature.parentId)) inbound.push({ id: feature.id, kind: 'child' })
+    })
+    return {
+      claimId: sources[0].claimId, sourceIds: sources.map(feature => feature.id), sourceLabels: sources.map(feature => feature.label),
+      text: sources.map(feature => feature.text.trim()).filter(Boolean).join('；'),
+      supportIds, referenceIds, parentId, annotations, inbound
+    }
+  }
+
+  mergeFeatures(ids: string[], label: string): void {
+    if (this.stateSubject.value.role === 'viewer') return
+    const preview = this.previewMerge(ids)
+    if (!preview) return
+    this.commit(state => {
+      const newFeature: Feature = {
+        id: `feature-${Date.now()}`, claimId: preview.claimId,
+        label: label.trim() || `合并特征（${preview.sourceLabels.length} 项）`,
+        text: preview.text, parentId: preview.parentId,
+        referenceIds: preview.referenceIds, supportIds: preview.supportIds, ownerRole: state.role
+      }
+      state.features.push(newFeature)
+      state.features.forEach(feature => {
+        if (feature.archived || feature.id === newFeature.id) return
+        feature.referenceIds = Array.from(new Set(feature.referenceIds.map(id => preview.sourceIds.includes(id) ? newFeature.id : id)))
+        if (feature.parentId && preview.sourceIds.includes(feature.parentId)) feature.parentId = newFeature.id
+      })
+      state.annotations.forEach(annotation => { if (preview.sourceIds.includes(annotation.featureId)) annotation.featureId = newFeature.id })
+      state.features.forEach(feature => { if (preview.sourceIds.includes(feature.id)) feature.archived = true })
+      state.structureRecords.unshift({
+        id: `structure-${Date.now()}`, type: 'merge', claimId: preview.claimId, createdAt: new Date().toISOString(),
+        sourceIds: preview.sourceIds, resultIds: [newFeature.id], sourceLabels: preview.sourceLabels, resultLabels: [newFeature.label],
+        summary: `合并 ${preview.sourceLabels.join('、')} → ${newFeature.label}`,
+        detail: `正文合并 ${preview.sourceIds.length} 段；依据 ${preview.supportIds.length} 段并入新特征；保留引用 ${preview.referenceIds.length} 项，${preview.inbound.length} 项外部父子/引用关系改指新特征；批注 ${preview.annotations.length} 条转移至新特征；原特征保留为历史。`
+      })
+      state.selectedFeatureId = newFeature.id
+    })
+  }
+
+  splitFeature(id: string, parts: SplitPartDraft[]): string | null {
+    const state = this.stateSubject.value
+    if (state.role === 'viewer') return '当前角色为只读，无法拆分特征。'
+    const original = state.features.find(feature => feature.id === id && !feature.archived)
+    if (!original) return '未找到要拆分的特征。'
+    if (parts.length < 2) return '至少需要拆分为两条子特征。'
+    if (parts.some(part => !part.label.trim() || !part.text.trim())) return '每条子特征的名称与正文都不能为空。'
+    const assigned = new Set(parts.flatMap(part => part.supportIds))
+    const missing = original.supportIds.filter(paragraphId => !assigned.has(paragraphId))
+    if (missing.length) {
+      const names = missing.map(paragraphId => state.paragraphs.find(item => item.id === paragraphId)?.section || paragraphId).join('、')
+      return `支持段落尚未分完：${names}。请逐项分配后再确认拆分。`
+    }
+    const stamp = Date.now()
+    const newIds = parts.map((_, index) => `feature-${stamp}-${index}`)
+    const newFeatures: Feature[] = parts.map((part, index) => ({
+      id: newIds[index], claimId: original.claimId, label: part.label.trim(), text: part.text.trim(),
+      parentId: original.parentId,
+      referenceIds: Array.from(new Set(part.referenceIds
+        .map(token => token.startsWith('part:') ? newIds[Number(token.slice(5))] : token)
+        .filter(refId => refId && refId !== newIds[index]))),
+      supportIds: [...part.supportIds], ownerRole: original.ownerRole
+    }))
+    const hypothetical = state.features
+      .filter(feature => !feature.archived && feature.id !== id)
+      .map(feature => ({ ...feature, referenceIds: feature.referenceIds.map(refId => refId === id ? newIds[0] : refId), parentId: feature.parentId === id ? newIds[0] : feature.parentId }))
+      .concat(newFeatures)
+    for (const newFeature of newFeatures) {
+      const cycle = this.findCyclePath(newFeature.id, hypothetical)
+      if (cycle) {
+        const names = cycle.map(featureId => hypothetical.find(feature => feature.id === featureId)?.label || featureId).join(' → ')
+        return `新引用形成循环：${names}。请调整涉及特征的引用关系后再确认。`
+      }
+    }
+    this.commit(draft => {
+      draft.features.push(...clone(newFeatures))
+      draft.features.forEach(feature => {
+        if (feature.archived) return
+        feature.referenceIds = feature.referenceIds.map(refId => refId === id ? newIds[0] : refId)
+        if (feature.parentId === id) feature.parentId = newIds[0]
+      })
+      const source = draft.features.find(feature => feature.id === id)
+      if (source) source.archived = true
+      draft.structureRecords.unshift({
+        id: `structure-${stamp}`, type: 'split', claimId: original.claimId, createdAt: new Date().toISOString(),
+        sourceIds: [id], resultIds: newIds, sourceLabels: [original.label], resultLabels: newFeatures.map(feature => feature.label),
+        summary: `拆分 ${original.label} → ${newFeatures.map(feature => feature.label).join('、')}`,
+        detail: `支持段落逐项分配：${newFeatures.map(feature => `${feature.label} ${feature.supportIds.length} 段`).join('，')}；原特征的外部引用与子特征改指 ${newFeatures[0].label}；批注 ${state.annotations.filter(item => item.featureId === id).length} 条随原特征保留为历史。`
+      })
+      draft.selectedFeatureId = newIds[0]
+    })
+    return null
   }
 
   toggleParagraphMapping(featureId: string, paragraphId: string): void {
@@ -226,7 +333,7 @@ export class WorkbenchService implements OnDestroy {
       state.claims = clone(version.claims)
       state.features = clone(version.features)
       if (!state.claims.some(claim => claim.id === state.selectedClaimId)) state.selectedClaimId = state.claims[0]?.id || ''
-      state.selectedFeatureId = state.features.find(feature => feature.claimId === state.selectedClaimId)?.id || null
+      state.selectedFeatureId = state.features.find(feature => feature.claimId === state.selectedClaimId && !feature.archived)?.id || null
     })
   }
 
@@ -265,7 +372,7 @@ export class WorkbenchService implements OnDestroy {
 
   exportCsv(): string {
     const state = this.stateSubject.value
-    const rows = state.features.map(feature => [
+    const rows = state.features.filter(feature => !feature.archived).map(feature => [
       state.claims.find(claim => claim.id === feature.claimId)?.number || '', feature.label, feature.text,
       state.features.find(item => item.id === feature.parentId)?.label || '',
       feature.referenceIds.map(id => state.features.find(item => item.id === id)?.label || id).join('；'),
@@ -278,13 +385,39 @@ export class WorkbenchService implements OnDestroy {
 
   validate(state = this.stateSubject.value): ValidationIssue[] {
     const issues: ValidationIssue[] = []
-    for (const feature of state.features) {
+    const active = state.features.filter(feature => !feature.archived)
+    for (const feature of active) {
       if (!feature.text.trim()) issues.push({ id: `empty-${feature.id}`, severity: 'warning', type: 'empty-feature', featureId: feature.id, title: `${feature.label} 内容为空`, detail: '请补全技术特征文字，避免映射对象不明确。' })
       if (!feature.supportIds.length) issues.push({ id: `support-${feature.id}`, severity: 'error', type: 'missing-support', featureId: feature.id, title: `${feature.label} 缺少说明书依据`, detail: '至少为一个说明书段落建立支持映射。' })
-      if (this.hasReferenceCycle(feature, state.features)) issues.push({ id: `cycle-${feature.id}`, severity: 'error', type: 'cycle', featureId: feature.id, title: `${feature.label} 存在循环引用`, detail: '特征层级或引用关系形成闭环，请移除其中一条关系。' })
+      if (this.hasReferenceCycle(feature, active)) issues.push({ id: `cycle-${feature.id}`, severity: 'error', type: 'cycle', featureId: feature.id, title: `${feature.label} 存在循环引用`, detail: '特征层级或引用关系形成闭环，请移除其中一条关系。' })
     }
     state.orphanMappings.forEach(item => issues.push({ id: item.id, severity: 'warning', type: 'orphan-mapping', title: '存在待清理映射', detail: item.reason }))
     return issues
+  }
+
+  private findCyclePath(startId: string, features: Feature[]): string[] | null {
+    const graph = new Map(features.map(feature => [feature.id, feature]))
+    const stack: string[] = []
+    const onStack = new Set<string>()
+    const done = new Set<string>()
+    const visit = (id: string): string[] | null => {
+      if (onStack.has(id)) return [...stack.slice(stack.indexOf(id)), id]
+      if (done.has(id)) return null
+      const feature = graph.get(id)
+      if (!feature) return null
+      stack.push(id)
+      onStack.add(id)
+      const nextIds = [...(feature.parentId ? [feature.parentId] : []), ...feature.referenceIds]
+      for (const nextId of nextIds) {
+        const cycle = visit(nextId)
+        if (cycle) return cycle
+      }
+      stack.pop()
+      onStack.delete(id)
+      done.add(id)
+      return null
+    }
+    return visit(startId)
   }
 
   private hasReferenceCycle(start: Feature, features: Feature[]): boolean {

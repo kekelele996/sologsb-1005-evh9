@@ -23,6 +23,7 @@ export interface Feature {
   referenceIds: string[]
   supportIds: string[]
   ownerRole: Role
+  archived?: boolean
 }
 
 export interface Annotation {
@@ -39,6 +40,38 @@ export interface OrphanMapping {
   featureLabel: string
   paragraphId: string
   reason: string
+}
+
+export interface StructureRecord {
+  id: string
+  type: 'merge' | 'split'
+  claimId: string
+  createdAt: string
+  sourceIds: string[]
+  resultIds: string[]
+  sourceLabels: string[]
+  resultLabels: string[]
+  summary: string
+  detail: string
+}
+
+export interface MergePreview {
+  claimId: string
+  sourceIds: string[]
+  sourceLabels: string[]
+  text: string
+  supportIds: string[]
+  referenceIds: string[]
+  parentId: string | null
+  annotations: Annotation[]
+  inbound: Array<{ id: string; kind: 'reference' | 'child' }>
+}
+
+export interface SplitPartDraft {
+  label: string
+  text: string
+  supportIds: string[]
+  referenceIds: string[]
 }
 
 export interface ClaimVersion {
@@ -62,6 +95,7 @@ export interface WorkbenchState {
   features: Feature[]
   annotations: Annotation[]
   orphanMappings: OrphanMapping[]
+  structureRecords: StructureRecord[]
   versions: ClaimVersion[]
   role: Role
   selectedClaimId: string
