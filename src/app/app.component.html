@@ -56,6 +56,7 @@
         <button [class.active]="state.activeTab === 'mapping'" (click)="service.setTab('mapping')"><i class="pi pi-sitemap"></i>特征映射</button>
         <button [class.active]="state.activeTab === 'claim'" (click)="service.setTab('claim')"><i class="pi pi-file-edit"></i>权利要求录入</button>
         <button [class.active]="state.activeTab === 'compare'" (click)="service.setTab('compare')"><i class="pi pi-arrows-h"></i>版本比较</button>
+        <button [class.active]="state.activeTab === 'structure'" (click)="service.setTab('structure')"><i class="pi pi-object-group"></i>结构记录</button>
         <button [class.active]="state.activeTab === 'audit'" (click)="service.setTab('audit')"><i class="pi pi-check-square"></i>核对清单</button>
       </nav>
 
@@ -63,12 +64,25 @@
         <div class="mapping-grid">
           <section class="panel feature-list-panel">
             <div class="panel-heading"><span>技术特征树</span><p-button label="新增特征" icon="pi pi-plus" size="small" [disabled]="!canEditMainData" (onClick)="service.addFeature()" /></div>
+            <div class="structure-toolbar" *ngIf="canEditMainData">
+              <div class="structure-check-info">
+                <span class="structure-check-count">{{ checkedFeatures.length }}</span>
+                <small>已勾选特征（限同一项权利要求）</small>
+              </div>
+              <div class="structure-check-actions">
+                <p-button label="合并预览" icon="pi pi-object-group" size="small" severity="secondary" [outlined]="true" [disabled]="!canOpenMerge" (onClick)="openMergePreview()" pTooltip="勾选至少 2 个特征后查看合并预览" />
+                <p-button label="拆分" icon="pi pi-sitemap" size="small" [outlined]="true" [disabled]="!canOpenSplit" (onClick)="openSplit()" pTooltip="勾选 1 个特征后拆分为多个子特征" />
+              </div>
+            </div>
             <div class="feature-tree">
-              <button *ngFor="let feature of claimFeatures; let i = index" type="button" class="feature-item" [class.selected]="feature.id === state.selectedFeatureId" [style.--depth]="feature.parentId ? 1 : 0" (click)="service.selectFeature(feature.id)">
+              <div *ngFor="let feature of claimFeatures" class="feature-item" [class.selected]="feature.id === state.selectedFeatureId" [style.--depth]="feature.parentId ? 1 : 0" (click)="service.selectFeature(feature.id)">
+                <label class="feature-check" (click)="$event.stopPropagation()" *ngIf="canEditMainData">
+                  <input type="checkbox" [checked]="checkedFeatureIds.has(feature.id)" (change)="toggleFeatureCheck(feature.id, $any($event.target).checked)" aria-label="选择用于结构调整">
+                </label>
                 <span class="feature-index">{{ feature.label.split('·')[0].trim() }}</span>
-                <span><strong>{{ feature.label }}</strong><small>{{ feature.text || '尚未填写特征内容' }}</small></span>
+                <span class="feature-item-text"><strong>{{ feature.label }}</strong><small>{{ feature.text || '尚未填写特征内容' }}</small></span>
                 <i class="pi pi-chevron-right"></i>
-              </button>
+              </div>
               <div *ngIf="!claimFeatures.length" class="empty-state">尚未拆分技术特征</div>
             </div>
           </section>
@@ -100,7 +114,10 @@
                 <span>{{ candidate.label }} · {{ candidate.text }}</span>
               </label>
             </fieldset>
-            <div class="button-row"><p-button label="删除特征" icon="pi pi-trash" severity="danger" [outlined]="true" [disabled]="!canEditMainData" (onClick)="service.deleteFeature(feature.id)"></p-button></div>
+            <div class="button-row">
+              <p-button label="拆分为子特征" icon="pi pi-sitemap" severity="secondary" [outlined]="true" [disabled]="!canEditMainData" (onClick)="openSplit(feature.id)"></p-button>
+              <p-button label="删除特征" icon="pi pi-trash" severity="danger" [outlined]="true" [disabled]="!canEditMainData" (onClick)="service.deleteFeature(feature.id)"></p-button>
+            </div>
           </section>
           <ng-template #noFeature><section class="panel empty-state large">请选择一个技术特征进行编辑。</section></ng-template>
 
@@ -186,6 +203,84 @@
         </section>
       </div>
 
+      <div class="view" *ngIf="state.activeTab === 'structure'">
+        <section class="panel structure-panel">
+          <div class="panel-heading"><span>结构调整记录</span><p-badge [value]="claimStructureRecords.length" severity="secondary" /></div>
+          <p class="hint">合并、拆分均在确认后生成新特征，原特征不删除而是标记为历史，依据、父子/引用关系和批注去向在此逐项回看。</p>
+          <div class="record-list" *ngIf="claimStructureRecords.length; else noRecords">
+            <article class="record-card" *ngFor="let record of claimStructureRecords">
+              <button type="button" class="record-head" (click)="toggleRecord(record.id)">
+                <span class="record-op" [class.merge]="record.op === 'merge'" [class.split]="record.op === 'split'">{{ recordOpLabel(record.op) }}</span>
+                <span class="record-summary"><strong>{{ record.summary }}</strong><small>{{ record.createdAt | date:'yyyy-MM-dd HH:mm:ss' }}</small></span>
+                <i class="pi" [class.pi-chevron-down]="isRecordExpanded(record.id)" [class.pi-chevron-right]="!isRecordExpanded(record.id)"></i>
+              </button>
+              <div class="record-detail" *ngIf="isRecordExpanded(record.id)">
+                <div class="record-block">
+                  <h4>原特征（历史留存）</h4>
+                  <div class="record-feature" *ngFor="let feature of record.sourceFeatures">
+                    <strong>{{ feature.label }}</strong>
+                    <p>{{ feature.text || '（无正文）' }}</p>
+                    <small>依据：{{ feature.supportIds.length ? feature.supportIds.map(paragraphLabel).join('；') : '无' }}</small>
+                  </div>
+                </div>
+                <div class="record-block">
+                  <h4>调整后新特征</h4>
+                  <div class="record-feature new" *ngFor="let feature of record.targetFeatures">
+                    <strong>{{ feature.label }}</strong>
+                    <p>{{ feature.text || '（无正文）' }}</p>
+                    <small>父级：{{ feature.parentId ? featureLabel(feature.parentId) : '顶层特征' }} · 引用：{{ feature.referenceIds.length ? feature.referenceIds.map(featureLabel).join('；') : '无' }} · 依据：{{ feature.supportIds.length ? feature.supportIds.map(paragraphLabel).join('；') : '无' }}</small>
+                  </div>
+                </div>
+                <div class="record-block">
+                  <h4>支持段落去向</h4>
+                  <ul class="record-lines">
+                    <li *ngFor="let row of record.supportRows">
+                      <i class="pi pi-book"></i>
+                      <span><strong>{{ row.section }}</strong>
+                        <ng-container [ngSwitch]="record.op">
+                          <em *ngSwitchCase="'merge'">来自 {{ row.sourceFeatureLabels.join('、') }}，合并后由“{{ recordTargetLabel(record, 0) }}”继承</em>
+                          <em *ngSwitchCase="'split'">原属 {{ row.sourceFeatureLabels.join('、') }}，分配给“{{ recordTargetLabel(record, row.targetChildIndex ?? -1) }}”</em>
+                        </ng-container>
+                      </span>
+                    </li>
+                  </ul>
+                </div>
+                <div class="record-block">
+                  <h4>父子 / 引用关系去向</h4>
+                  <ul class="record-lines">
+                    <li *ngFor="let row of record.relationRows">
+                      <i class="pi" [class.pi-arrow-up]="row.direction === 'incoming'" [class.pi-arrow-right]="row.direction === 'outgoing'"></i>
+                      <span><strong>{{ row.featureLabel }}</strong><em>{{ row.detail }}</em></span>
+                    </li>
+                    <li *ngIf="!record.relationRows.length" class="muted">该次调整不涉及父子或引用关系变更。</li>
+                  </ul>
+                </div>
+                <div class="record-block">
+                  <h4>批注去向</h4>
+                  <ul class="record-lines">
+                    <li *ngFor="let row of record.annotationRows">
+                      <i class="pi pi-comment"></i>
+                      <span><strong>{{ row.authorName }}</strong><em>{{ row.text }}</em><em class="dest">{{ row.detail }}</em></span>
+                    </li>
+                    <li *ngIf="!record.annotationRows.length" class="muted">原特征当时没有批注。</li>
+                  </ul>
+                </div>
+              </div>
+            </article>
+          </div>
+          <ng-template #noRecords><div class="empty-state large">本条权利要求还没有结构调整记录。在“特征映射”页勾选多个特征可合并，勾选单个特征可拆分。</div></ng-template>
+
+          <div class="history-features" *ngIf="claimHistoryFeatures.length">
+            <h3>历史特征（{{ claimHistoryFeatures.length }}）</h3>
+            <p class="hint">下列特征已被合并或拆分归档，不再出现在特征树与校验中。</p>
+            <div class="history-chip" *ngFor="let feature of claimHistoryFeatures">
+              <strong>{{ feature.label }}</strong>
+              <small>{{ feature.text || '（无正文）' }}</small>
+            </div>
+          </div>
+        </section>
+      </div>
+
       <div class="view" *ngIf="state.activeTab === 'audit'">
         <section class="panel audit-panel">
           <div class="panel-heading"><span>提交前核对清单</span><span class="status-chip" [class.ready]="!errorCount">{{ errorCount ? errorCount + ' 项待处理' : '校验通过' }}</span></div>
@@ -253,4 +348,149 @@
     <p>{{ issue.detail }}</p>
   </div>
   <ng-template pTemplate="footer"><p-button label="关闭" (onClick)="closeIssue()" /></ng-template>
+</p-dialog>
+
+<p-dialog header="合并预览" [(visible)]="mergeDialog" [modal]="true" [style]="{ width: '820px' }" (visibleChange)="!$event && cancelMerge()">
+  <div class="dialog-body structure-dialog" *ngIf="mergePreview as preview">
+    <p class="dialog-lead">确认后将生成一条新特征，勾选的 {{ preview.sourceFeatures.length }} 个原特征会标记为历史（不删除），以下为正文、依据、关联与批注的完整去向。</p>
+
+    <div class="preview-block">
+      <h4><i class="pi pi-list"></i>合并来源</h4>
+      <ul class="preview-sources">
+        <li *ngFor="let feature of preview.sourceFeatures">
+          <strong>{{ feature.label }}</strong>
+          <p>{{ feature.text || '（无正文）' }}</p>
+        </li>
+      </ul>
+    </div>
+
+    <div class="preview-block">
+      <h4><i class="pi pi-file-edit"></i>新特征正文（可调整）</h4>
+      <label>新特征名称<input pInputText [value]="mergeDraftLabel" (input)="mergeDraftLabel = $any($event.target).value; refreshMergeDraft()" placeholder="合并后的特征名称"></label>
+      <label>新特征正文<textarea pTextarea rows="3" [value]="mergeDraftText" (input)="mergeDraftText = $any($event.target).value; refreshMergeDraft()"></textarea></label>
+    </div>
+
+    <div class="preview-block">
+      <h4><i class="pi pi-book"></i>说明书依据（{{ preview.supportIds.length }} 段，自动取并集去重）</h4>
+      <ul class="preview-lines">
+        <li *ngFor="let row of preview.supportRows"><strong>{{ row.section }}</strong><em>来自 {{ row.sourceFeatureLabels.join('、') }}</em></li>
+      </ul>
+    </div>
+
+    <div class="preview-block">
+      <h4><i class="pi pi-sitemap"></i>父子 / 引用关联去向（{{ preview.relationRows.length }} 条）</h4>
+      <ul class="preview-lines relations">
+        <li *ngFor="let row of preview.relationRows" [class.drop]="row.action === 'drop'">
+          <span class="rel-tag" [class.keep]="row.action === 'keep'" [class.redirect]="row.action === 'redirect'" [class.drop]="row.action === 'drop'">{{ row.action === 'keep' ? '保留' : row.action === 'redirect' ? '重定向' : '取消' }}</span>
+          <span class="rel-text"><strong>{{ row.featureLabel }}</strong><em>{{ row.detail }}</em></span>
+        </li>
+        <li *ngIf="!preview.relationRows.length" class="muted">这些特征与其他特征之间没有父子或引用关系。</li>
+      </ul>
+    </div>
+
+    <div class="preview-block">
+      <h4><i class="pi pi-comment"></i>批注去向（{{ preview.annotationRows.length }} 条）</h4>
+      <ul class="preview-lines">
+        <li *ngFor="let row of preview.annotationRows"><strong>{{ row.authorName }}</strong><em>{{ row.text }}</em><em class="dest">→ 迁移到新特征</em></li>
+        <li *ngIf="!preview.annotationRows.length" class="muted">来源特征没有批注。</li>
+      </ul>
+    </div>
+
+    <div class="structure-errors" *ngIf="mergeBlocked">
+      <div class="error-title"><i class="pi pi-times-circle"></i>发现 {{ preview.errors.length }} 项阻断问题，确认按钮已停用</div>
+      <p *ngFor="let error of preview.errors">{{ error }}</p>
+      <div class="cycle-box" *ngFor="let cycle of preview.cycles">
+                <strong>循环引用，涉及特征：</strong>
+        <span *ngFor="let label of cycle.labels; let first = first" [class.arrow]="!first">{{ label }}</span>
+      </div>
+    </div>
+  </div>
+  <ng-template pTemplate="footer">
+    <p-button label="取消" severity="secondary" [outlined]="true" (onClick)="cancelMerge()" />
+    <p-button label="确认合并，原特征留作历史" icon="pi pi-check" [disabled]="mergeBlocked" (onClick)="confirmMerge()" />
+  </ng-template>
+</p-dialog>
+
+<p-dialog header="拆分技术特征" [(visible)]="splitDialog" [modal]="true" [style]="{ width: '900px' }" (visibleChange)="!$event && cancelSplit()">
+  <div class="dialog-body structure-dialog" *ngIf="splitPlan as plan">
+    <p class="dialog-lead">将“{{ plan.sourceFeature.label }}”拆分为多个子特征。原特征确认后标记为历史（不删除），支持段落必须逐项分配完毕，且新的父子/引用关系不能形成循环。</p>
+
+    <div class="preview-block">
+      <div class="split-children-head">
+        <h4><i class="pi pi-sitemap"></i>子特征（{{ plan.children.length }}）</h4>
+        <p-button label="增加一条" icon="pi pi-plus" size="small" severity="secondary" [outlined]="true" [disabled]="plan.children.length >= 6" (onClick)="addSplitChild()" />
+      </div>
+      <div class="split-child" *ngFor="let child of plan.children; let ci = index">
+        <header>
+          <strong>子特征 {{ ci + 1 }}</strong>
+          <p-button icon="pi pi-trash" severity="danger" [text]="true" size="small" [disabled]="plan.children.length <= 2" (onClick)="removeSplitChild(ci)" />
+        </header>
+        <label>名称<input pInputText [value]="child.label" (input)="updateSplitChild(ci, { label: $any($event.target).value })"></label>
+        <label>正文<textarea pTextarea rows="2" [value]="child.text" (input)="updateSplitChild(ci, { text: $any($event.target).value })"></textarea></label>
+        <div class="split-child-rel">
+          <label class="split-select">父级
+            <select [value]="child.parentId === null ? '' : child.parentId" (change)="updateSplitChild(ci, { parentId: $any($event.target).value || null })">
+              <option value="">无（顶层特征）</option>
+              <option *ngFor="let option of splitParentOptions(ci)" [value]="option.value">{{ option.label }}</option>
+            </select>
+          </label>
+          <div class="split-refs">
+            <span>引用其他特征</span>
+            <label *ngFor="let option of splitReferenceOptions(ci)" class="check-row">
+              <input type="checkbox" [checked]="isSplitReferenceChecked(ci, option.value)" (change)="toggleSplitReference(ci, option.value, $any($event.target).checked)">
+              <span>{{ option.label }}</span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="preview-block">
+      <h4><i class="pi pi-book"></i>支持段落逐项分配</h4>
+      <p class="hint" *ngIf="!splitParagraphs.length">原特征没有映射支持段落，拆分后各子特征需要在特征树中重新映射，否则会提示“缺少依据”。</p>
+      <table class="split-table" *ngIf="splitParagraphs.length">
+        <thead><tr><th>说明书段落</th><th *ngFor="let child of plan.children; let ci = index">子{{ ci + 1 }}</th></tr></thead>
+        <tbody>
+          <tr *ngFor="let paragraph of splitParagraphs">
+            <td>{{ paragraph.section }}</td>
+            <td *ngFor="let child of plan.children; let ci = index">
+              <input type="radio" [name]="'support-' + paragraph.id" [checked]="plan.supportAssignment[paragraph.id] === ci" (change)="assignSupport(paragraph.id, ci)" [attr.aria-label]="'分配给' + child.label">
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="preview-block" *ngIf="plan.incoming.length">
+      <h4><i class="pi pi-arrow-up"></i>指向原特征的关系（逐项选择去向）</h4>
+      <div class="incoming-row" *ngFor="let row of plan.incoming">
+        <span><strong>{{ row.featureLabel }}</strong><em>{{ row.kind === 'parent' ? '的父级指向原特征' : '引用了原特征' }}</em></span>
+        <select [value]="row.childIndex >= 0 ? row.childIndex : ''" (change)="setIncomingTarget(row, +$any($event.target).value)">
+          <option value="" disabled>请选择子特征…</option>
+          <option *ngFor="let child of plan.children; let ci = index" [value]="ci">{{ child.label }}</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="preview-block">
+      <h4><i class="pi pi-comment"></i>批注去向（{{ plan.annotationRows.length }} 条）</h4>
+      <ul class="preview-lines" *ngIf="plan.annotationRows.length">
+        <li *ngFor="let row of plan.annotationRows"><strong>{{ row.authorName }}</strong><em>{{ row.text }}</em><em class="dest">→ {{ row.detail }}</em></li>
+      </ul>
+      <p class="muted" *ngIf="!plan.annotationRows.length">原特征没有批注；历史批注将随原特征保留，可在“结构记录”中回看。</p>
+    </div>
+
+    <div class="structure-errors" *ngIf="splitBlocked">
+      <div class="error-title"><i class="pi pi-times-circle"></i>尚有问题未处理，确认按钮已停用</div>
+      <p *ngFor="let error of plan.errors">{{ error }}</p>
+      <div class="cycle-box" *ngFor="let cycle of plan.cycles">
+        <strong>循环引用，涉及特征：</strong>
+        <span *ngFor="let label of cycle.labels; let first = first" [class.arrow]="!first">{{ label }}</span>
+      </div>
+    </div>
+  </div>
+  <ng-template pTemplate="footer">
+    <p-button label="取消" severity="secondary" [outlined]="true" (onClick)="cancelSplit()" />
+    <p-button label="确认拆分，原特征留作历史" icon="pi pi-check" [disabled]="splitBlocked" (onClick)="confirmSplit()" />
+  </ng-template>
 </p-dialog>
